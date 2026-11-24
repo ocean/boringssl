@@ -885,6 +885,44 @@ TEST(CipherTest, WycheproofAESCBC) {
                 });
 }
 
+// A nonce is good for one message. Once `EVP_CipherFinal_ex` has run, the
+// context must be given a new one before it processes anything else.
+TEST(CipherTest, ChaCha20Poly1305NoReuseAfterFinal) {
+  static const uint8_t kKey[32] = {1};
+  static const uint8_t kNonce[12] = {2};
+  static const uint8_t kPlaintext[32] = {3};
+  uint8_t out[sizeof(kPlaintext)], tag[16];
+  int len;
+
+  UniquePtr<EVP_CIPHER_CTX> ctx(EVP_CIPHER_CTX_new());
+  ASSERT_TRUE(ctx);
+  ASSERT_TRUE(EVP_EncryptInit_ex(ctx.get(), EVP_chacha20_poly1305(), nullptr,
+                                 kKey, kNonce));
+  ASSERT_TRUE(EVP_EncryptUpdate(ctx.get(), out, &len, kPlaintext,
+                                sizeof(kPlaintext)));
+  ASSERT_TRUE(EVP_EncryptFinal_ex(ctx.get(), out, &len));
+  ASSERT_TRUE(
+      EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_AEAD_GET_TAG, sizeof(tag), tag));
+
+  EXPECT_FALSE(EVP_EncryptUpdate(ctx.get(), out, &len, kPlaintext,
+                                 sizeof(kPlaintext)));
+  EXPECT_FALSE(EVP_EncryptUpdate(ctx.get(), nullptr, &len, kPlaintext,
+                                 sizeof(kPlaintext)));
+  EXPECT_FALSE(EVP_EncryptFinal_ex(ctx.get(), out, &len));
+  ERR_clear_error();
+
+  // The key is kept, so a new nonce alone starts the next message.
+  ASSERT_TRUE(
+      EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, nullptr, kNonce));
+  ASSERT_TRUE(EVP_EncryptUpdate(ctx.get(), out, &len, kPlaintext,
+                                sizeof(kPlaintext)));
+  ASSERT_TRUE(EVP_EncryptFinal_ex(ctx.get(), out, &len));
+  uint8_t tag2[16];
+  ASSERT_TRUE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_AEAD_GET_TAG,
+                                  sizeof(tag2), tag2));
+  EXPECT_EQ(Bytes(tag), Bytes(tag2));
+}
+
 TEST(CipherTest, WycheproofChaCha20Poly1305) {
   FileTestGTest(
       "third_party/wycheproof_testvectors/chacha20_poly1305_test.txt",

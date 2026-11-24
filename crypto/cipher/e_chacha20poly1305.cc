@@ -632,6 +632,9 @@ int cipher_chacha20_poly1305_final(EVP_CIPHER_CTX *ctx) {
   uint8_t tag[POLY1305_TAG_LEN];
   CRYPTO_poly1305_finish(&c->poly, tag);
   c->mac_inited = false;
+  // The nonce is spent. Another message under it would reuse the one-time
+  // Poly1305 key, so a new nonce must be set first, as with `aes_gcm`.
+  c->nonce_set = false;
 
   if (!ctx->encrypt) {
     if (CRYPTO_memcmp(tag, c->tag, c->tag_len) != 0) {
