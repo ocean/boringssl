@@ -885,6 +885,131 @@ TEST(CipherTest, WycheproofAESCBC) {
                 });
 }
 
+TEST(CipherTest, WycheproofChaCha20Poly1305) {
+  FileTestGTest(
+      "third_party/wycheproof_testvectors/chacha20_poly1305_test.txt",
+      [](FileTest *t) {
+        t->IgnoreInstruction("keySize");
+        t->IgnoreInstruction("tagSize");
+        std::string iv_size;
+        ASSERT_TRUE(t->GetInstruction(&iv_size, "ivSize"));
+
+        std::vector<uint8_t> key, iv, msg, ct, aad, tag;
+        ASSERT_TRUE(t->GetBytes(&key, "key"));
+        ASSERT_TRUE(t->GetBytes(&iv, "iv"));
+        ASSERT_TRUE(t->GetBytes(&msg, "msg"));
+        ASSERT_TRUE(t->GetBytes(&ct, "ct"));
+        ASSERT_TRUE(t->GetBytes(&aad, "aad"));
+        ASSERT_TRUE(t->GetBytes(&tag, "tag"));
+        WycheproofResult result;
+        ASSERT_TRUE(GetWycheproofResult(t, &result));
+
+        const EVP_CIPHER *cipher = EVP_chacha20_poly1305();
+        if (atoi(iv_size.c_str()) != 96) {
+          // Only the 96-bit nonce of RFC 8439 is accepted.
+          ASSERT_FALSE(result.IsValid());
+          UniquePtr<EVP_CIPHER_CTX> ctx(EVP_CIPHER_CTX_new());
+          ASSERT_TRUE(ctx);
+          ASSERT_TRUE(EVP_DecryptInit_ex(ctx.get(), cipher, nullptr, nullptr,
+                                         nullptr));
+          EXPECT_FALSE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_AEAD_SET_IVLEN,
+                                           static_cast<int>(iv.size()),
+                                           nullptr));
+          ERR_clear_error();
+          return;
+        }
+
+        TestCipher(cipher,
+                   result.IsValid() ? Operation::kBoth
+                                    : Operation::kInvalidDecrypt,
+                   /*padding=*/false, key, iv, msg, ct, aad, tag);
+      });
+}
+
+// Node's and Bun's crypto.createCipheriv() configure a cipher in two steps and
+// set the tag length before the key, and createDecipheriv() may only learn the
+// tag after the ciphertext. (RFC 8439, section 2.8.2)
+TEST(CipherTest, ChaCha20Poly1305NodeCallSequence) {
+  std::vector<uint8_t> key, iv, aad, pt, ct, tag;
+  ASSERT_TRUE(DecodeHex(
+      &key,
+      "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"));
+  ASSERT_TRUE(DecodeHex(&iv, "070000004041424344454647"));
+  ASSERT_TRUE(DecodeHex(&aad, "50515253c0c1c2c3c4c5c6c7"));
+  ASSERT_TRUE(DecodeHex(
+      &pt,
+      "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f6620"
+      "2739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e65207469"
+      "7020666f7220746865206675747572652c2073756e73637265656e20776f756c6420626520"
+      "69742e"));
+  ASSERT_TRUE(DecodeHex(
+      &ct,
+      "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8c"
+      "a9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803"
+      "aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec6"
+      "4b6116"));
+  ASSERT_TRUE(DecodeHex(&tag, "1ae10b594f09e26a7e902ecbd0600691"));
+
+  const EVP_CIPHER *cipher = EVP_get_cipherbyname("chacha20-poly1305");
+  ASSERT_TRUE(cipher);
+
+  for (int tag_len : {16, 12, 8}) {
+    SCOPED_TRACE(tag_len);
+    for (bool encrypt : {true, false}) {
+      SCOPED_TRACE(encrypt);
+      UniquePtr<EVP_CIPHER_CTX> ctx(EVP_CIPHER_CTX_new());
+      ASSERT_TRUE(ctx);
+      ASSERT_TRUE(EVP_CipherInit_ex(ctx.get(), cipher, nullptr, nullptr,
+                                    nullptr, encrypt));
+      ASSERT_TRUE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_AEAD_SET_IVLEN,
+                                      static_cast<int>(iv.size()), nullptr));
+      ASSERT_TRUE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_AEAD_SET_TAG,
+                                      tag_len, nullptr));
+      ASSERT_TRUE(EVP_CIPHER_CTX_set_key_length(
+          ctx.get(), static_cast<unsigned>(key.size())));
+      ASSERT_TRUE(EVP_CipherInit_ex(ctx.get(), nullptr, nullptr, key.data(),
+                                    iv.data(), encrypt));
+
+      // setAAD().
+      int len;
+      ASSERT_TRUE(EVP_CipherUpdate(ctx.get(), nullptr, &len, aad.data(),
+                                   static_cast<int>(aad.size())));
+
+      // update(), split inside a ChaCha20 block.
+      const std::vector<uint8_t> &in = encrypt ? pt : ct;
+      const std::vector<uint8_t> &expected = encrypt ? ct : pt;
+      std::vector<uint8_t> out(in.size());
+      size_t out_len;
+      ASSERT_TRUE(EVP_CipherUpdate_ex(ctx.get(), out.data(), &out_len,
+                                      out.size(), in.data(), 70));
+      ASSERT_EQ(out_len, 70u);
+      ASSERT_TRUE(EVP_CipherUpdate_ex(ctx.get(), out.data() + 70, &out_len,
+                                      out.size() - 70, in.data() + 70,
+                                      in.size() - 70));
+      ASSERT_EQ(out_len, in.size() - 70);
+      EXPECT_EQ(Bytes(out), Bytes(expected));
+
+      uint8_t final_buf[EVP_MAX_BLOCK_LENGTH];
+      if (encrypt) {
+        ASSERT_TRUE(EVP_CipherFinal_ex2(ctx.get(), final_buf, &out_len,
+                                        sizeof(final_buf)));
+        EXPECT_EQ(out_len, 0u);
+        uint8_t got_tag[16];
+        ASSERT_TRUE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_AEAD_GET_TAG,
+                                        tag_len, got_tag));
+        EXPECT_EQ(Bytes(got_tag, tag_len), Bytes(tag.data(), tag_len));
+      } else {
+        // setAuthTag() after the ciphertext.
+        ASSERT_TRUE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_AEAD_SET_TAG,
+                                        tag_len, tag.data()));
+        ASSERT_TRUE(EVP_CipherFinal_ex2(ctx.get(), final_buf, &out_len,
+                                        sizeof(final_buf)));
+        EXPECT_EQ(out_len, 0u);
+      }
+    }
+  }
+}
+
 TEST(CipherTest, SHA1WithSecretSuffix) {
   uint8_t buf[SHA_CBLOCK * 4];
   RAND_bytes(buf, sizeof(buf));
