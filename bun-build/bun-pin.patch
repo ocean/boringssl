@@ -1,0 +1,22 @@
+diff --git a/scripts/build/deps/boringssl.ts b/scripts/build/deps/boringssl.ts
+index 734ac067b..718498321 100644
+--- a/scripts/build/deps/boringssl.ts
++++ b/scripts/build/deps/boringssl.ts
+@@ -24,7 +24,7 @@ import { quote } from "../shell.ts";
+ import type { Dependency, DirectBuild } from "../source.ts";
+ import { LIBC_ALLOCATION_SYMBOLS, depSourceDir } from "../source.ts";
+ 
+-const BORINGSSL_COMMIT = "fe703e9faa3bfd22b04eb192066856557b7e015c";
++const BORINGSSL_COMMIT = "e4ecd8d9b8abbf95e448d5a23236eb984d9ca46d";
+ 
+ export const boringssl: Dependency = {
+   name: "boringssl",
+@@ -32,7 +32,7 @@ export const boringssl: Dependency = {
+ 
+   source: () => ({
+     kind: "github-archive",
+-    repo: "oven-sh/boringssl",
++    repo: "ocean/boringssl",
+     commit: BORINGSSL_COMMIT,
+   }),
+ 
